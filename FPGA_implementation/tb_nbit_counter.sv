@@ -5,7 +5,7 @@ module tb_nbit_counter;
 
   //Ports
   reg trig = 0;
-  wire logic [n : 0] count;
+  wire logic [n-1 : 0] count;
 
   nbit_counter # (
                  .n(n)
@@ -15,11 +15,14 @@ module tb_nbit_counter;
                  .count(count)
                );
 
-  always #10 trig = !trig;
+  always #5 trig = !trig;
 
-  initial
-  begin
-    #200 $finish;
+  initial begin
+    // Generate waveform file
+    $dumpfile("tb_nbit_counter.vcd");
+    $dumpvars(0, tb_nbit_counter);
+    
+    #320 $finish;
   end
 
 endmodule
