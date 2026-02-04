@@ -18,6 +18,3 @@ def video_to_frames(video_path, fps=30, resolution=(640, 480)):
         print(f"Success! Frames are in: {folder_name}")
     except subprocess.CalledProcessError as e:
         print(f"FFmpeg error: {e}")
-
-# Example usage:
-# video_to_frames('intro.mp4', fps=10, resolution=(1280, 720))
