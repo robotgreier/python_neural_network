@@ -2,8 +2,9 @@ import subprocess
 import os
 
 def video_to_frames(video_path, fps=30, resolution=(640, 480)):
+    print(f"Started processing of {video_path}")
     # Create a folder based on the video filename (e.g., "my_video_frames")
-    folder_name = os.path.splitext(os.path.basename(video_path))[0] + "_frames"
+    folder_name = "Images"
     os.makedirs(folder_name, exist_ok=True)
 
     command = [
@@ -18,3 +19,6 @@ def video_to_frames(video_path, fps=30, resolution=(640, 480)):
         print(f"Success! Frames are in: {folder_name}")
     except subprocess.CalledProcessError as e:
         print(f"FFmpeg error: {e}")
+
+"""
+video_to_frames("video.mp4", 5)"""
