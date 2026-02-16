@@ -1,7 +1,7 @@
 import numpy as np
 
 class LIF():
-    def __init__(self, beta=0.9, threshold=2.0, reset=0.5, learning_rate=0.1):
+    def __init__(self, beta=0.9, threshold=2.0, reset=0.0, learning_rate=0.1):
         self.beta = beta
         self.threshold = threshold
         self.mem = 0.0
@@ -17,7 +17,7 @@ class LIF():
 
         # Update eligibility trace
         self.eligibility = self.eligibility_decay * self.eligibility + synaptic_input
-        self.eligibility = np.clip(self.eligibility, -200, 200)
+        self.eligibility = np.clip(self.eligibility, -10, 10)
 
         # Update membrane potential
         self.mem = self.beta * self.mem + synaptic_input
@@ -26,12 +26,13 @@ class LIF():
         if self.mem > self.threshold:
             self.spk = 1
             self.mem = self.reset
+            self.eligibility = self.reset
         
         return self.spk
 
     def STDP(self, weight, pre_eligibility, is_winner):
         # Standard STDP for offline/unsupervised learning
-        timing_factor = np.clip(pre_eligibility * self.eligibility, -300, 300)
+        timing_factor = np.clip(pre_eligibility * self.eligibility, -10, 10)
         
         if is_winner:
             weight += self.learning_rate * timing_factor
@@ -42,7 +43,7 @@ class LIF():
 
     def rSTDP(self, weight, pre_eligibility, is_winner, dopamine):
         # Reward-modulated STDP for online learning with reward signal
-        timing_factor = np.clip(pre_eligibility * self.eligibility, -300, 300)
+        timing_factor = np.clip(pre_eligibility * self.eligibility, -10, 10)
         effective_lr = self.learning_rate / (1 + abs(timing_factor) / 200)
         
         if is_winner:
