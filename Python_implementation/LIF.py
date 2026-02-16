@@ -1,7 +1,7 @@
 import numpy as np
 
 class LIF():
-    def __init__(self, beta=0.9, threshold=2.0, reset=0.0, learning_rate=0.1):
+    def __init__(self, beta=0.9, threshold=2.0, reset=0.0, learning_rate=0.1, eligibility_decay=0.9):
         self.beta = beta
         self.threshold = threshold
         self.mem = 0.0
@@ -9,7 +9,7 @@ class LIF():
         self.learning_rate = learning_rate
         self.spk = 0
         self.eligibility = 0.0
-        self.eligibility_decay = 0.90
+        self.eligibility_decay = eligibility_decay
 
     def update(self, synaptic_input):
         # Reset spike
