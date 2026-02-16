@@ -5,7 +5,7 @@ class FrameProcessor:
     """
     Class for processing frames - detecting keypoints for each current frame and returning
     """
-    def __init__(self, threshold_edges, n_bins_x=4, n_bins_y=3, frame_width=640, frame_height=480):
+    def __init__(self, threshold_edges, n_bins_x=4, n_bins_y=3, frame_width=640, frame_height=480, fast_threshold=20):
         self.threshold_edges = threshold_edges
         self.n_bins_x = n_bins_x
         self.n_bins_y = n_bins_y
@@ -14,7 +14,10 @@ class FrameProcessor:
         
         # Internal state to store the previous frame keypoint
         self.kp_counts_old = None
-        self.orb = cv.ORB_create()
+        
+        # Initiate FAST detector
+        self.fast = cv.FastFeatureDetector_create(threshold=fast_threshold)
+        self.fast.setNonmaxSuppression(True)
 
     def encoder_keypoints_event_driven(self, new_val, prev_val):
         """
@@ -32,7 +35,7 @@ class FrameProcessor:
             
         return 0
 
-    def process_and_encode_frame(self, current_frame_path, response_cutoff=0.000):
+    def process_and_encode_frame(self, current_frame_path, response_cutoff=0.000, max_keypoints=500):
         """
         Processes a single frame and compares it to the stored previous frame 
         to return a spike train based on threshold intervals.
@@ -45,12 +48,13 @@ class FrameProcessor:
         if current_frame is None:
             return []
 
-        # Detect and compute keypoints
-        keypoints = self.orb.detect(current_frame, None)
-        keypoints, des = self.orb.compute(current_frame, keypoints)
+        # Detect keypoints
+        keypoints = self.fast.detect(current_frame, None)
 
-        # Filter keypoints by response
+        # Filter by response and limit to max_keypoints
         kp_list = [kp for kp in keypoints if kp.response >= response_cutoff]
+        if len(kp_list) > max_keypoints:
+            kp_list = sorted(kp_list, key=lambda x: x.response, reverse=True)[:max_keypoints]
 
         # Extract keypoint coordinates for the frame
         x_data = [kp.pt[0] for kp in kp_list]
