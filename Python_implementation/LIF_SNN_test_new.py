@@ -44,7 +44,7 @@ class RSTDPSynapse:
             w_min/w_max: Weight bounds
     """
 
-    def __init__(self, learning_rate=0.01, w_init=None, tau_pre=5, tau_post=5, tau_e=15, A_plus=0.01, A_minus=0.015, w_min=0.01, w_max=1.0):
+    def __init__(self, learning_rate=0.01, w_init=None, tau_pre=3, tau_post=3, tau_e=15, A_plus=0.01, A_minus=0.015, w_min=0.01, w_max=1.0):
 
         self.learning_rate = learning_rate
         self.weight = w_init if w_init is not None else np.random.uniform(0.1, 0.5)
