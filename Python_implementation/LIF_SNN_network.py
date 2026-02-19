@@ -3,23 +3,21 @@ import numpy as np
 
 class LIF:
     """
-    Leaky Integrate-and-Fire neuron with R-STDP learning.
+    Leaky Integrate-and-Fire neuron with STDP/R-STDP learning.
     """
 
-    def __init__(self, beta=0.9, threshold=2.0, reset=0.0):
+    def __init__(self, decay=0.2, threshold=2.0, reset=0.0):
         # --- Neuron dynamics ---
-        self.beta = beta              # Membrane decay (leak factor)
+        self.decay = decay              # Membrane decay (leak factor, subtracted each step)
         self.threshold = threshold
         self.reset = reset
         self.mem = 0.0
         self.spk = 0
 
-        self.post_trace = 0.0         # Tracks recent post-synaptic spikes
-
     def update(self, synaptic_input):
-        """Standard LIF membrane update. Returns spike (0 or 1)."""
+        """Membrane update. Returns spike (0 or 1)."""
         self.spk = 0
-        self.mem = self.beta * self.mem + synaptic_input
+        self.mem = max(0.0, self.mem - self.decay + synaptic_input)
 
         if self.mem >= self.threshold:
             self.spk = 1
@@ -30,40 +28,41 @@ class LIF:
 
 class RSTDPSynapse:
     """
-    Reward-modulated STDP synapse.
+    Reward-modulated STDP synapse with rectangular window.
 
     Args:
             learning_rate: Scales the weight update
             w_init: Initial weight (random if None)
-            tau_pre/tau_post: Time constants for pre/post synaptic traces (frames)
-                              Controls the STDP window width
-            tau_e: Eligibility trace decay time constant (frames)
-            A_plus/A_minus: STDP potentiation/depression amplitudes
-                            A_minus > A_plus gives slight depression bias
-                            which helps prevent runaway excitation
-            w_min/w_max: Weight bounds
+            t_pre/t_post: Rectangular STDP window widths (timesteps)
+                          Pre-before-post within t_pre → LTP (causal)
+                          Post-before-pre within t_post → LTD (acausal)
+            tau_e_shift: Eligibility decay as right-shift (divide by 2^N each step)
+                         Higher = slower decay, longer credit assignment window
+            dw_pos/dw_neg: Fixed weight increment/decrement on spike pairing
+                           Equivalent to A_plus/A_minus in exponential STDP
+            w_min/w_max: Weight clamps
     """
 
-    def __init__(self, learning_rate=0.01, w_init=None, tau_pre=5, tau_post=5, tau_e=15, A_plus=0.01, A_minus=0.015, w_min=0.01, w_max=1.0):
+    DISABLED = -1
+
+    def __init__(self, learning_rate=0.1, w_init=None,
+                 t_pre=5, t_post=5, tau_e_shift=4,
+                 dw_pos=0.125, dw_neg=0.125,
+                 w_min=0.05, w_max=1.0):
 
         self.learning_rate = learning_rate
-        self.weight = w_init if w_init is not None else np.random.uniform(0.1, 0.5)
+        self.weight = w_init if w_init is not None else np.random.uniform(0.3, 0.8)
 
         # STDP window parameters
-        self.tau_pre = tau_pre
-        self.tau_post = tau_post
-        self.tau_e = tau_e
-        self.A_plus = A_plus
-        self.A_minus = A_minus
+        self.t_pre = t_pre
+        self.t_post = t_post
+        self.tau_e_shift = tau_e_shift
+        self.dw_pos = dw_pos
+        self.dw_neg = dw_neg
 
-        # Pre-computed decay constants
-        self.pre_decay = np.exp(-1.0 / self.tau_pre)
-        self.post_decay = np.exp(-1.0 / self.tau_post)
-        self.e_decay = np.exp(-1.0 / self.tau_e)
-
-        # Trace state variables
-        self.pre_trace = 0.0
-        self.post_trace = 0.0
+        # Counter-based trace state (replaces exponential traces)
+        self.pre_timer = self.DISABLED      # -1 = inactive, 0+ = counting
+        self.post_timer = self.DISABLED
         self.eligibility = 0.0
 
         # Weight bounds
@@ -72,31 +71,42 @@ class RSTDPSynapse:
 
     def update_traces_and_eligibility(self, pre_spike, post_spike):
         """
-        Update synaptic traces and eligibility each timestep.
+        Update spike timing counters and eligibility each timestep.
+        
+        Uses rectangular STDP windows: if a spike pair occurs within
+        the window, eligibility is incremented/decremented by dw_pos/dw_neg.
         
         Args:
             pre_spike: 1 if pre-synaptic neuron fired, 0 otherwise
             post_spike: 1 if post-synaptic neuron fired, 0 otherwise  
-            dt: timestep duration (frames)
         """
-        # Decay traces exponentially
-        self.pre_trace *= self.pre_decay
-        self.post_trace *= self.post_decay
+        # Advance timers, expire if past window
+        if self.pre_timer >= 0:
+            self.pre_timer += 1
+            if self.pre_timer > self.t_pre:
+                self.pre_timer = self.DISABLED
 
-        # STDP event accumulation into eligibility
-        stdp_update = 0.0
+        if self.post_timer >= 0:
+            self.post_timer += 1
+            if self.post_timer > self.t_post:
+                self.post_timer = self.DISABLED
 
+        # On pre-spike: start pre timer, check for acausal pairing (LTD)
         if pre_spike:
-            # Pre before post (LTD): depress based on recent post activity
-            stdp_update -= self.A_minus * self.post_trace
-            self.pre_trace += 1.0
+            if self.post_timer >= 0 and self.post_timer <= self.t_post:
+                self.eligibility -= self.dw_neg
+                self.post_timer = self.DISABLED
+            self.pre_timer = 0
 
+        # On post-spike: start post timer, check for causal pairing (LTP)
         if post_spike:
-            # Post after pre (LTP): potentiate based on recent pre activity
-            stdp_update += self.A_plus * self.pre_trace
-            self.post_trace += 1.0
+            if self.pre_timer >= 0 and self.pre_timer <= self.t_pre:
+                self.eligibility += self.dw_pos
+                self.pre_timer = self.DISABLED
+            self.post_timer = 0
 
-        self.eligibility = self.e_decay * self.eligibility + stdp_update
+        # Decay eligibility via right-shift (FPGA: subtract eligibility >> tau_e_shift)
+        self.eligibility = self.eligibility - self.eligibility / (1 << self.tau_e_shift)
 
     def apply_reward(self, dopamine):
         """
@@ -111,8 +121,7 @@ class RSTDPSynapse:
 
 class SNNLayer:
     """
-    A single fully-connected SNN layer with R-STDP learning.
-    Manages neurons and their incoming synapses.
+    A fully-connected SNN layer with STDP/R-STDP learning.
 
     Args:
             n_input: Number of pre-synaptic input neurons
@@ -139,7 +148,7 @@ class SNNLayer:
 
     def forward(self, input_spikes):
         """
-        Process one timestep.
+        Process one timestep/frams.
         
         Args:
             input_spikes: List/array of length n_input (0s and 1s)
@@ -168,14 +177,15 @@ class SNNLayer:
                 )
 
         return output_spikes
-    
 
     def winner_takes_all(self, output_spikes):
         """
         Returns index of winning neuron.
+        Spiking neurons always beat non-spiking ones.
+        Membrane potential breaks ties within same category.
         """
         spiking = [i for i, s in enumerate(output_spikes) if s == 1]
-        
+
         if len(spiking) == 1:
             return spiking[0]
         elif len(spiking) > 1:
@@ -183,14 +193,12 @@ class SNNLayer:
         else:
             # No spikes: highest membrane potential
             return int(np.argmax([n.mem for n in self.neurons]))
-        
 
     def apply_reward(self, dopamine, winner_idx):
         """Apply reward only to the winning neuron's synapses."""
         for i in range(self.n_inputs):
             # Reinforce/punish winner
             self.synapses[winner_idx][i].apply_reward(dopamine)
-            
 
     def get_weights(self):
         """Return weight matrix as numpy array [n_output x n_input]."""
@@ -198,9 +206,9 @@ class SNNLayer:
             [self.synapses[j][i].weight for i in range(self.n_inputs)]
             for j in range(self.n_outputs)
         ])
-    
+
     def reset_state(self):
-        """Reset the state of all neurons in the network"""
+        """Reset the state of all neurons in the network."""
         for n in self.neurons:
             n.mem = 0.0
             n.spk = 0
