@@ -3,12 +3,17 @@ import numpy as np
 
 class LIF:
     """
-    Leaky Integrate-and-Fire neuron with STDP/R-STDP learning.
+    Leaky Integrate-and-Fire neuron.
+
+    Args:
+            decay: Membrane decay (subtraction based)
+            threshold: Magnutude of membrane potential needed to produce a spike
+            reset: Value the membrane potential is reset to after spike
     """
 
     def __init__(self, decay=0.2, threshold=2.0, reset=0.0):
         # --- Neuron dynamics ---
-        self.decay = decay              # Membrane decay (leak factor, subtracted each step)
+        self.decay = decay              # Membrane decay
         self.threshold = threshold
         self.reset = reset
         self.mem = 0.0
@@ -43,6 +48,7 @@ class RSTDPSynapse:
             w_min/w_max: Weight clamps
     """
 
+    # Eligibility traces start as disabled/inactive
     DISABLED = -1
 
     def __init__(self, learning_rate=0.1, w_init=None,
@@ -60,8 +66,8 @@ class RSTDPSynapse:
         self.dw_pos = dw_pos
         self.dw_neg = dw_neg
 
-        # Counter-based trace state (replaces exponential traces)
-        self.pre_timer = self.DISABLED      # -1 = inactive, 0+ = counting
+        # Counter-based trace state (pre/post_timer = -1 -> inactive, 0+ = counting)
+        self.pre_timer = self.DISABLED
         self.post_timer = self.DISABLED
         self.eligibility = 0.0
 
@@ -80,7 +86,7 @@ class RSTDPSynapse:
             pre_spike: 1 if pre-synaptic neuron fired, 0 otherwise
             post_spike: 1 if post-synaptic neuron fired, 0 otherwise  
         """
-        # Advance timers, expire if past window
+        # STDP causality timers
         if self.pre_timer >= 0:
             self.pre_timer += 1
             if self.pre_timer > self.t_pre:
@@ -91,14 +97,14 @@ class RSTDPSynapse:
             if self.post_timer > self.t_post:
                 self.post_timer = self.DISABLED
 
-        # On pre-spike: start pre timer, check for acausal pairing (LTD)
+        # STDP on pre-spike: start pre timer, check for acausality (LTD)
         if pre_spike:
             if self.post_timer >= 0 and self.post_timer <= self.t_post:
                 self.eligibility -= self.dw_neg
                 self.post_timer = self.DISABLED
             self.pre_timer = 0
 
-        # On post-spike: start post timer, check for causal pairing (LTP)
+        # STDP on post-spike: start post timer, check for causality (LTP)
         if post_spike:
             if self.pre_timer >= 0 and self.pre_timer <= self.t_pre:
                 self.eligibility += self.dw_pos
@@ -121,7 +127,7 @@ class RSTDPSynapse:
 
 class SNNLayer:
     """
-    A fully-connected SNN layer with STDP/R-STDP learning.
+    A fully-connected SNN with STDP/R-STDP learning.
 
     Args:
             n_input: Number of pre-synaptic input neurons
@@ -182,7 +188,7 @@ class SNNLayer:
         """
         Returns index of winning neuron.
         Spiking neurons always beat non-spiking ones.
-        Membrane potential breaks ties within same category.
+        Magnitude of membrane potential breaks ties.
         """
         spiking = [i for i, s in enumerate(output_spikes) if s == 1]
 
