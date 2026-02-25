@@ -23,7 +23,7 @@ class LIF:
     def update(self, synaptic_input):
         """Membrane update. Returns spike (0 or 1)."""
         self.spk = 0
-        self.mem = max(0.0, self.mem - self.decay + synaptic_input)
+        self.mem = max(-0.5, self.mem - self.decay + synaptic_input)
         self.pre_reset_mem = self.mem  # Cache membrane potential before reset for WTA
 
         if self.mem >= self.threshold:
@@ -89,12 +89,14 @@ class RSTDPSynapse:
         self.w_min = w_min
         self.w_max = w_max
 
-    def update_traces_and_eligibility(self, pre_spike, post_spike):
+    def update_eligibility(self, pre_spike, post_spike):
         """
         Update spike timing counters and eligibility each timestep.
 
         Uses rectangular STDP windows: if a spike pair occurs within
         the window, eligibility is incremented/decremented by dw_pos/dw_neg.
+        Timers run independently so multiple pairings within a window
+        are detected — equivalent to parallel trace registers in HDL.
 
         In 'stdp' mode, weight is updated immediately after eligibility update
         (dopamine=1.0), so no external apply_reward() call is needed.
@@ -118,20 +120,21 @@ class RSTDPSynapse:
         if pre_spike:
             if self.post_timer >= 0 and self.post_timer <= self.t_post:
                 self.eligibility -= self.dw_neg
-                self.post_timer = self.DISABLED
             self.pre_timer = 0
 
         # STDP on post-spike: start post timer, check for causality (LTP)
         if post_spike:
             if self.pre_timer >= 0 and self.pre_timer <= self.t_pre:
                 self.eligibility += self.dw_pos
-                self.pre_timer = self.DISABLED
             self.post_timer = 0
 
-        # Decay eligibility via right-shift (FPGA: subtract eligibility >> tau_e_shift)
+        # Decay eligibility via right-shift
         self.eligibility = self.eligibility - self.eligibility / (1 << self.tau_e_shift)
 
-        # In stdp mode, apply weight update immediately (no external reward signal)
+        # Clamp eligibility
+        self.eligibility = np.clip(self.eligibility, -1.0, 1.0)
+
+        # In stdp mode, apply weight update immediately
         if self.mode == 'stdp':
             self.apply_reward(dopamine=1.0)
 
@@ -201,22 +204,26 @@ class SNNLayer:
 
         # Update synapses after all neurons have been evaluated
         if self.mode == 'stdp':
-            # Lateral inhibition: only winner's synapses are updated,
-            # losers' membrane potentials are suppressed
+            # Lateral inhibition: only winner's synapses receive LTP/LTD,
+            # but all eligibility traces decay each step
             winner = self.winner_takes_all(output_spikes)
             for j in range(self.n_outputs):
                 if j != winner:
                     self.neurons[j].mem = self.neurons[j].reset  # suppress losers
-            for i in range(self.n_inputs):
-                self.synapses[winner][i].update_traces_and_eligibility(
-                    pre_spike=input_spikes[i],
-                    post_spike=output_spikes[winner],
-                )
+            for j in range(self.n_outputs):
+                for i in range(self.n_inputs):
+                    # Winner gets full pre/post spike events; losers only decay
+                    pre = input_spikes[i] if j == winner else 0
+                    post = output_spikes[j] if j == winner else 0
+                    self.synapses[j][i].update_eligibility(
+                        pre_spike=pre,
+                        post_spike=post,
+                    )
         else:
             # R-STDP: update all synapses, weight updates happen externally via apply_reward()
             for j in range(self.n_outputs):
                 for i in range(self.n_inputs):
-                    self.synapses[j][i].update_traces_and_eligibility(
+                    self.synapses[j][i].update_eligibility(
                         pre_spike=input_spikes[i],
                         post_spike=output_spikes[j],
                     )
@@ -260,8 +267,13 @@ class SNNLayer:
         ])
 
     def reset_state(self):
-        """Reset the state of all neurons in the network."""
+        """Reset the state of all neurons and synaptic traces in the network."""
         for n in self.neurons:
             n.mem = 0.0
             n.spk = 0
             n.pre_reset_mem = 0.0
+        for j in range(self.n_outputs):
+            for i in range(self.n_inputs):
+                self.synapses[j][i].eligibility = 0.0
+                self.synapses[j][i].pre_timer = RSTDPSynapse.DISABLED
+                self.synapses[j][i].post_timer = RSTDPSynapse.DISABLED
