@@ -11,7 +11,7 @@ class LIF:
             reset: Value the membrane potential is reset to after spike
     """
 
-    def __init__(self, decay=0.2, threshold=2.0, reset=0.0):
+    def __init__(self, decay=0.75, threshold=4.0, reset=0.0):
         # --- Neuron dynamics ---
         self.decay = decay              # Membrane decay
         self.threshold = threshold
@@ -23,7 +23,7 @@ class LIF:
     def update(self, synaptic_input):
         """Membrane update. Returns spike (0 or 1)."""
         self.spk = 0
-        self.mem = max(-0.5, self.mem - self.decay + synaptic_input)
+        self.mem = self.mem - self.decay + synaptic_input
         self.pre_reset_mem = self.mem  # Cache membrane potential before reset for WTA
 
         if self.mem >= self.threshold:
@@ -63,10 +63,10 @@ class RSTDPSynapse:
     # Eligibility traces start as disabled/inactive
     DISABLED = -1
 
-    def __init__(self, learning_rate=0.1, w_init=None,
-                 t_pre=5, t_post=5, tau_e_shift=4,
-                 dw_pos=0.125, dw_neg=0.125,
-                 w_min=0.05, w_max=1.0,
+    def __init__(self, learning_rate=0.125, w_init=0.3,
+                 t_pre=2, t_post=3, tau_e_shift=4,
+                 dw_pos=0.25, dw_neg=0.03125,
+                 w_min=0.03125, w_max=1.0,
                  mode='rstdp'):
 
         self.mode = mode
