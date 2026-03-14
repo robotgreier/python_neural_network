@@ -1,2 +1,2 @@
-decay,threshold,reset,learning_rate,w_init,t_pre,t_post,tau_e_shift,dw_pos,dw_neg,w_min,w_max,mode,dopamine_correct,dopamine_wrong,mean_train_acc,std_train_acc,mean_test_acc,std_test_acc
-0.75,4.0,0.0,0.125,0.3,2,3,4,0.25,0.03125,0.03125,1.0,rstdp,0.5,-1.0,0.5932000000000001,0.0,0.7000000000000002,0.0
+decay,threshold,reset,lr_shift,w_init,t_pre,t_post,tau_e_shift,dw_pos,dw_neg,w_min,w_max,mode,dopamine_correct_shift,dopamine_wrong_shift,mean_train_acc,std_train_acc,mean_test_acc,std_test_acc
+192,1024,0,3,77,2,3,4,64,8,8,255,rstdp,0,1,0.5960000000000001,0.0,0.8080000000000002,1.1102230246251565e-16

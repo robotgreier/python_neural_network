@@ -11,19 +11,19 @@ class LIF:
             reset: Value the membrane potential is reset to after spike
     """
 
-    def __init__(self, decay=192, threshold=1024, reset=0):
+    def __init__(self, decay=0.75, threshold=4.0, reset=0.0):
         # --- Neuron dynamics ---
-        self.decay = decay              # Membrane decay (uint8, scaled x256)
-        self.threshold = threshold      # uint16, scaled x256
+        self.decay = decay              # Membrane decay
+        self.threshold = threshold
         self.reset = reset
-        self.mem = 0                    # uint16, never negative
-        self.pre_reset_mem = 0         # Membrane potential before reset, used for WTA
+        self.mem = 0.0
+        self.pre_reset_mem = 0.0       # Membrane potential before reset, used for WTA
         self.spk = 0
 
     def update(self, synaptic_input):
         """Membrane update. Returns spike (0 or 1)."""
         self.spk = 0
-        self.mem = max(0, self.mem - self.decay) + synaptic_input  # saturating sub → uint16
+        self.mem = self.mem - self.decay + synaptic_input
         self.pre_reset_mem = self.mem  # Cache membrane potential before reset for WTA
 
         if self.mem >= self.threshold:
@@ -48,7 +48,7 @@ class RSTDPSynapse:
 
     Args:
             mode: 'rstdp' (default) or 'stdp'
-            lr_shift: Learning rate as right-shift (lr = 1 / 2^lr_shift)
+            learning_rate: Scales the weight update
             w_init: Initial weight (random if None)
             t_pre/t_post: Rectangular STDP window widths (timesteps)
                           Pre-before-post within t_pre → LTP (causal)
@@ -63,15 +63,15 @@ class RSTDPSynapse:
     # Eligibility traces start as disabled/inactive
     DISABLED = -1
 
-    def __init__(self, lr_shift=3, w_init=77,
+    def __init__(self, learning_rate=0.125, w_init=0.3,
                  t_pre=2, t_post=3, tau_e_shift=4,
-                 dw_pos=64, dw_neg=8,
-                 w_min=8, w_max=255,
+                 dw_pos=0.25, dw_neg=0.03125,
+                 w_min=0.03125, w_max=1.0,
                  mode='rstdp'):
 
         self.mode = mode
-        self.lr_shift = lr_shift        # learning rate as right-shift: 1/8 = >> 3
-        self.weight = w_init if w_init is not None else np.random.randint(77, 205)  # uint8
+        self.learning_rate = learning_rate
+        self.weight = w_init if w_init is not None else np.random.uniform(0.3, 0.8)
 
         # STDP window parameters
         self.t_pre = t_pre
@@ -83,7 +83,7 @@ class RSTDPSynapse:
         # Counter-based trace state (pre/post_timer = -1 -> inactive, 0+ = counting)
         self.pre_timer = self.DISABLED
         self.post_timer = self.DISABLED
-        self.eligibility = 0   # int16, range [−256, 256]
+        self.eligibility = 0.0
 
         # Weight bounds
         self.w_min = w_min
@@ -128,47 +128,26 @@ class RSTDPSynapse:
                 self.eligibility += self.dw_pos
             self.post_timer = 0
 
-        # Decay eligibility via arithmetic right-shift (integer)
-        self.eligibility = self.eligibility - (self.eligibility >> self.tau_e_shift)
+        # Decay eligibility via right-shift
+        self.eligibility = self.eligibility - self.eligibility / (1 << self.tau_e_shift)
 
-        # Clamp eligibility to int16 range
-        self.eligibility = int(np.clip(self.eligibility, -256, 256))
+        # Clamp eligibility
+        self.eligibility = np.clip(self.eligibility, -1.0, 1.0)
 
         # In stdp mode, apply weight update immediately
         if self.mode == 'stdp':
-            self.apply_reward(dopamine_shift=0, dopamine_sign=1, dopamine_enable=1)
+            self.apply_reward(dopamine=1.0)
 
-    def apply_reward(self, dopamine_shift, dopamine_sign, dopamine_enable):
+    def apply_reward(self, dopamine):
         """
         Apply reward-modulated weight update.
 
-        HDL mapping:
-            - dopamine_enable: 1-bit gate — skips update entirely when 0
-            - Barrel shifter: |eligibility| << dopamine_shift, then >> lr_shift
-            - Add/sub mux: dopamine_sign=1 → weight + delta, dopamine_sign=0 → weight - delta
-            - Saturating clamp to [w_min, w_max]: two comparators, two muxes
-
         Args:
-            dopamine_shift: Shift amount (0–2). Effective magnitude = 2^dopamine_shift / 2^lr_shift.
-                            E.g. with lr_shift=3: shift=0 → 1/8, shift=1 → 1/4, shift=2 → 1/2.
-            dopamine_sign:  1 = reward (weight + delta), 0 = punishment (weight - delta).
-            dopamine_enable: 1 = apply update, 0 = no-op.
-
-        Note: eligibility is treated as magnitude only (abs). Dopamine sign alone controls
-              the update direction. This simplifies HDL to a single add/sub mux with no
-              sign interaction between dopamine and eligibility.
+            dopamine: Reward signal. Positive reinforces correlated activity, negative punishes it.
+                      In 'stdp' mode this is always 1.0 (called internally).
         """
-        if not dopamine_enable:
-            return
-
-        delta_w = abs(self.eligibility << dopamine_shift) >> self.lr_shift
-
-        if dopamine_sign:
-            new_weight = self.weight + delta_w
-        else:
-            new_weight = self.weight - delta_w
-
-        self.weight = int(np.clip(new_weight, self.w_min, self.w_max))  # uint8
+        delta_w = self.learning_rate * dopamine * self.eligibility
+        self.weight = np.clip(self.weight + delta_w, self.w_min, self.w_max)
 
 
 class SNNLayer:
@@ -269,7 +248,7 @@ class SNNLayer:
             # No spikes: highest pre-reset membrane potential
             return int(np.argmax([n.pre_reset_mem for n in self.neurons]))
 
-    def apply_reward(self, dopamine_shift, dopamine_sign, winner_idx):
+    def apply_reward(self, dopamine, winner_idx):
         """
         Apply reward only to the winning neuron's synapses.
         No-op in 'stdp' mode (weights already updated in forward()).
@@ -277,7 +256,8 @@ class SNNLayer:
         if self.mode == 'stdp':
             return
         for i in range(self.n_inputs):
-            self.synapses[winner_idx][i].apply_reward(dopamine_shift, dopamine_sign, dopamine_enable=1)
+            # Reinforce/punish winner
+            self.synapses[winner_idx][i].apply_reward(dopamine)
 
     def get_weights(self):
         """Return weight matrix as numpy array [n_outputs x n_inputs]."""
@@ -287,7 +267,7 @@ class SNNLayer:
         ])
     
 
-    def load_weights(self, weight_file="weights.mem"):
+    def load_weights(self, weight_file="weights.mem", scale=127):
         """Loads and sets the weights of the current model from file"""
         # Load file
         with open(weight_file, "r") as f:
@@ -297,19 +277,24 @@ class SNNLayer:
         # Iterate over each synapse
         for i in range(self.n_outputs):
             for j in range(self.n_inputs):
-                w = int(lines[idx].strip(), 16)  # uint8
-                self.synapses[i][j].weight = w
+                # Extract weight from file and convert to uint8
+                w = int(lines[idx].strip(), 16)
+                # Convert from uint8 back to signed int8
+                if w > 127:
+                    w -= 256
+                # Update weight
+                self.synapses[i][j].weight = w / scale
                 idx += 1
 
 
     def reset_state(self):
         """Reset the state of all neurons and synaptic traces in the network."""
         for n in self.neurons:
-            n.mem = 0
+            n.mem = 0.0
             n.spk = 0
-            n.pre_reset_mem = 0
+            n.pre_reset_mem = 0.0
         for j in range(self.n_outputs):
             for i in range(self.n_inputs):
-                self.synapses[j][i].eligibility = 0
+                self.synapses[j][i].eligibility = 0.0
                 self.synapses[j][i].pre_timer = RSTDPSynapse.DISABLED
                 self.synapses[j][i].post_timer = RSTDPSynapse.DISABLED
