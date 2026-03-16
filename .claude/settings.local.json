@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/eirik/Desktop/Bachelor/Python_Neural_Network/NR>1 && $31+0 >= 0.605 {printf \"\"\"\"Row %d: n_inputs=%s, dw_pos=%s, dw_neg=%s, test_acc=%s/**)",
+      "Read(//c/Users/eirik/Desktop/Bachelor/Python_Neural_Network/NR>1 {n_inputs=$12; mean_test=$31; sum[n_inputs]+=mean_test; count[n_inputs]++} END {for \\(ni in count\\) printf \"\"\"\"\"\"\"\"n_inputs=%s: avg_test_acc=%.6f, count=%d/n\"\"\"\"\"\"\"\", ni, sum[ni]/**)",
+      "Bash(sort -t'=' -k1,1n)",
+      "Read(//c/Users/eirik/Desktop/Bachelor/Python_Neural_Network/NR>1 {n_bins_x=$4; n_bins_y=$5; key=n_bins_x\"\"\"\"\"\"\"\"x\"\"\"\"\"\"\"\"n_bins_y; mean_test=$31; sum[key]+=mean_test; count[key]++} END {for \\(k in count\\) printf \"\"\"\"\"\"\"\"n_bins_x,y=%s: avg_test_acc=%.6f, count=%d/n\"\"\"\"\"\"\"\", k, sum[k]/**)",
+      "Bash(sort -rn -k3)"
+    ]
+  }
+}

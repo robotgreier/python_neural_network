@@ -3,3 +3,8 @@ fast_keypoints/
 Images/
 video.mp4/
 Trening/
+Python_implementation/CSV_results/preprocessing_tuning_results_rough2.csv
+Python_implementation/CSV_results/preprocessing_tuning_results_rough3.csv
+Python_implementation/CSV_results/preprocessing_tuning_results.csv
+Python_implementation/CSV_results/test_spike_trains.csv
+Python_implementation/CSV_results/train_spike_trains.csv
