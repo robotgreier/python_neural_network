@@ -63,7 +63,20 @@ class RSTDPSynapse:
     # Eligibility traces start as disabled/inactive
     DISABLED = -1
 
-    def __init__(self, lr_shift=3, w_init=77,
+    # Decode table: dopamine_code → (s1, s2, s2_enable)
+    # Two barrel shifts are summed to produce finer-grained magnitudes without DSP slices.
+    DOPAMINE_DECODE = {
+        0: (0, 0, False),  # disabled (dopamine_enable handles this, but consistent)
+        1: (0, 0, False),  # ×1
+        2: (1, 0, False),  # ×2
+        3: (1, 0, True),   # ×3
+        4: (2, 0, False),  # ×4
+        5: (2, 0, True),   # ×5
+        6: (2, 1, True),   # ×6
+        7: (3, 0, False),  # ×8
+    }
+
+    def __init__(self, lr_shift=3, w_init=64,
                  t_pre=2, t_post=3, tau_e_shift=4,
                  dw_pos=64, dw_neg=8,
                  w_min=8, w_max=255,
@@ -134,23 +147,26 @@ class RSTDPSynapse:
         # Clamp eligibility to int16 range
         self.eligibility = max(-256, min(256, self.eligibility))
 
-        # In stdp mode, apply weight update immediately
+        # In stdp mode, apply weight update immediately (code=1 → ×1 multiplier)
         if self.mode == 'stdp':
-            self.apply_reward(dopamine_shift=0, dopamine_sign=1, dopamine_enable=1)
+            self.apply_reward(dopamine_code=1, dopamine_sign=1, dopamine_enable=1)
 
-    def apply_reward(self, dopamine_shift, dopamine_sign, dopamine_enable):
+    def apply_reward(self, dopamine_code, dopamine_sign, dopamine_enable):
         """
         Apply reward-modulated weight update.
 
         HDL mapping:
             - dopamine_enable: 1-bit gate — skips update entirely when 0
-            - Barrel shifter: |eligibility| << dopamine_shift, then >> lr_shift
-            - Add/sub mux: dopamine_sign=1 → weight + delta, dopamine_sign=0 → weight - delta
-            - Saturating clamp to [w_min, w_max]: two comparators, two muxes
+            - Decode LUT: dopamine_code → (s1, s2, s2_enable)
+            - Dual barrel shifters: shifted_1 = |elig| << s1, shifted_2 = |elig| << s2 (gated)
+            - Adder: magnitude = shifted_1 + shifted_2
+            - >> lr_shift, then add/sub mux, then saturating clamp
 
         Args:
-            dopamine_shift: Shift amount (0–2). Effective magnitude = 2^dopamine_shift / 2^lr_shift.
-                            E.g. with lr_shift=3: shift=0 → 1/8, shift=1 → 1/4, shift=2 → 1/2.
+            dopamine_code:  3-bit index into DOPAMINE_DECODE LUT (0–7).
+                            Maps to two shift amounts for finer magnitude resolution.
+                            E.g. with lr_shift=3: code=1 → 1/8, code=2 → 1/4,
+                            code=3 → 3/8, code=4 → 1/2, code=7 → 1.
             dopamine_sign:  1 = reward (weight + delta), 0 = punishment (weight - delta).
             dopamine_enable: 1 = apply update, 0 = no-op.
 
@@ -161,7 +177,13 @@ class RSTDPSynapse:
         if not dopamine_enable:
             return
 
-        delta_w = abs(self.eligibility << dopamine_shift) >> self.lr_shift
+        s1, s2, s2_enable = self.DOPAMINE_DECODE[dopamine_code]
+
+        magnitude = abs(self.eligibility) << s1
+        if s2_enable:
+            magnitude += abs(self.eligibility) << s2
+
+        delta_w = magnitude >> self.lr_shift
 
         if dopamine_sign:
             new_weight = self.weight + delta_w
@@ -271,7 +293,7 @@ class SNNLayer:
             post_mat[winner] = output_arr[winner]
             self._update_eligibility(pre_mat, post_mat)
 
-            # Immediate weight update for all synapses (dopamine_sign=1, dopamine_shift=0)
+            # Immediate weight update for all synapses (dopamine_sign=1, dopamine_code=1 → ×1)
             delta_w = np.abs(self.eligibility) >> self.lr_shift
             self.weights = np.clip(self.weights + delta_w, self.w_min, self.w_max)
         else:
@@ -351,14 +373,39 @@ class SNNLayer:
         else:
             return int(np.argmax(self.pre_reset_mem))
 
-    def apply_reward(self, dopamine_shift, dopamine_sign, winner_idx):
+    # Decode table: dopamine_code → (s1, s2, s2_enable)
+    DOPAMINE_DECODE = [
+        (0, 0, False),  # code 0: disabled
+        (0, 0, False),  # code 1: ×1
+        (1, 0, False),  # code 2: ×2
+        (1, 0, True),   # code 3: ×3
+        (2, 0, False),  # code 4: ×4
+        (2, 0, True),   # code 5: ×5
+        (2, 1, True),   # code 6: ×6
+        (3, 0, False),  # code 7: ×8
+    ]
+
+    def apply_reward(self, dopamine_code, dopamine_sign, winner_idx):
         """
         Apply reward only to the winning neuron's synapses.
         No-op in 'stdp' mode (weights already updated in forward()).
+
+        Args:
+            dopamine_code:  3-bit index into DOPAMINE_DECODE LUT (0–7).
+            dopamine_sign:  1 = reward, 0 = punishment.
+            winner_idx:     Row index of the winning neuron.
         """
         if self.mode == 'stdp':
             return
-        delta_w = (np.abs(self.eligibility[winner_idx]) << dopamine_shift) >> self.lr_shift
+
+        s1, s2, s2_enable = self.DOPAMINE_DECODE[dopamine_code]
+
+        mag = np.abs(self.eligibility[winner_idx]) << s1
+        if s2_enable:
+            mag = mag + (np.abs(self.eligibility[winner_idx]) << s2)
+
+        delta_w = mag >> self.lr_shift
+
         if dopamine_sign:
             new_row = self.weights[winner_idx] + delta_w
         else:
