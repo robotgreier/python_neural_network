@@ -1,2 +1,2 @@
-decay,threshold,reset,lr_shift,w_init,t_pre,t_post,tau_e_shift,dw_pos,dw_neg,w_min,w_max,mode,reward_shift,punish_shift,feedback,mean_train_acc,std_train_acc,mean_test_acc,std_test_acc
-128,512,0,3,,3,4,4,16,32,8,255,rstdp,0,1,True,0.047619047619047616,0.0,0.050793650793650794,0.0
+decay,threshold,reset,lr_shift,w_init,t_pre,t_post,tau_e_shift,dw_pos,dw_neg,w_min,w_max,mode,reward_code,punish_code,mean_train_acc,std_train_acc,mean_test_acc,std_test_acc
+64,512,0,4,,3,2,2,32,2,8,255,rstdp,0,0,0.27181404421326394,0.0014629388816645161,0.27567567567567564,0.0
