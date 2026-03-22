@@ -104,7 +104,7 @@ class RSTDPSynapse:
         self.eligibility -= self.eligibility >> self.tau_e_shift
         self.eligibility = max(-256, min(256, self.eligibility))
 
-        # In stdp mode, apply weight update immediately (dopamine=1 → ×1 multiplier)
+        # In stdp mode, apply weight update immediately based on eligibility trace (dopamine=1 -> ×1 multiplier)
         if self.mode == 'stdp':
             self.apply_reward(dopamine=1)
 
@@ -222,7 +222,7 @@ class SNNLayer:
             post_mat[winner] = output_arr[winner]
             self._update_eligibility(pre_mat, post_mat)
 
-            # Immediate weight update for all synapses (dopamine=1 → signed multiply ×1)
+            # Immediate weight update for all synapses (dopamine=1 -> signed multiply ×1)
             delta_w = self.eligibility >> self.lr_shift
             self.weights = np.clip(self.weights + delta_w, self.w_min, self.w_max)
         else:
