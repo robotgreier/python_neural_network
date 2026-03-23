@@ -180,7 +180,7 @@ class SNNLayer:
 
         w_init = synapse_params.get('w_init', None)
         if w_init is None:
-            self.weights = np.random.randint(77, 205, size=(n_outputs, self.n_inputs), dtype=np.int32)
+            self.weights = np.random.randint(64, 192, size=(n_outputs, self.n_inputs), dtype=np.int32)
         else:
             self.weights = np.full((n_outputs, self.n_inputs), w_init, dtype=np.int32)
 
@@ -211,7 +211,7 @@ class SNNLayer:
         self.spike_count += output_arr
 
         if self.mode == 'stdp':
-            winner = self._winner_from_arr(output_arr)
+            winner = self.winner_takes_all(output_arr)
             # Lateral inhibition: suppress all non-winner membranes
             self.mem[np.arange(self.n_outputs) != winner] = self.reset_val
 
@@ -269,15 +269,12 @@ class SNNLayer:
         Returns index of winning neuron.
         Spiking neurons beat non-spiking ones; pre-reset membrane breaks ties.
         """
-        return self._winner_from_arr(np.asarray(output_spikes, dtype=np.int32))
-
-    def _winner_from_arr(self, output_arr):
-        spiking = np.where(output_arr == 1)[0]
-        if len(spiking) == 1:
-            return int(spiking[0])
-        if len(spiking) > 1:
-            return int(spiking[np.argmax(self.pre_reset_mem[spiking])])
-        return int(np.argmax(self.pre_reset_mem))
+        spikes = np.asarray(output_spikes, dtype=np.int32)
+        spiking = np.where(spikes == 1)[0]
+        # If any neurons spiked, compete among them; otherwise all compete
+        pool = spiking if len(spiking) > 0 else np.arange(len(spikes))
+        # Highest pre-reset membrane potential wins (deterministic, no index bias)
+        return int(pool[np.argmax(self.pre_reset_mem[pool])])
 
     def apply_reward(self, dopamine, winner_idx):
         """
