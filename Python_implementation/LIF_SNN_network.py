@@ -146,7 +146,7 @@ class SNNLayer:
         feedback: If True, adds one extra input driven by NOR of previous outputs
     """
 
-    def __init__(self, n_inputs, n_outputs, neuron_params=None, synapse_params=None, feedback=False):
+    def __init__(self, n_inputs, n_outputs, neuron_params=None, synapse_params=None, feedback=False, track_eligibility=False):
         neuron_params  = neuron_params  or {}
         synapse_params = synapse_params or {}
 
@@ -187,6 +187,9 @@ class SNNLayer:
         self.eligibility = np.zeros((n_outputs, self.n_inputs), dtype=np.int32)
         self.pre_timer   = np.full((n_outputs, self.n_inputs), -1, dtype=np.int32)
         self.post_timer  = np.full((n_outputs, self.n_inputs), -1, dtype=np.int32)
+
+        self.track_eligibility   = track_eligibility
+        self.eligibility_history = []  # list of (n_outputs, n_inputs) snapshots
 
     def forward(self, input_spikes):
         """
@@ -264,6 +267,9 @@ class SNNLayer:
         self.eligibility -= self.eligibility >> self.tau_e_shift
         np.clip(self.eligibility, -256, 256, out=self.eligibility)
 
+        if self.track_eligibility:
+            self.eligibility_history.append(self.eligibility.copy())
+
     def winner_takes_all(self, output_spikes):
         """
         Returns index of winning neuron.
@@ -303,6 +309,15 @@ class SNNLayer:
             hex_values = [int(line.strip(), 16) for line in f]
         self.weights[:] = np.array(hex_values, dtype=np.int32).reshape(self.n_outputs, self.n_inputs)
 
+    def get_eligibility_history(self):
+        """
+        Return eligibility trace history as a numpy array of shape
+        (timesteps, n_outputs, n_inputs). Requires track_eligibility=True.
+        """
+        if not self.eligibility_history:
+            return np.empty((0, self.n_outputs, self.n_inputs), dtype=np.int32)
+        return np.stack(self.eligibility_history)
+
     def reset_state(self):
         """Reset all neuron and synapse trace state."""
         self.mem[:]           = 0
@@ -313,3 +328,4 @@ class SNNLayer:
         self.post_timer[:]    = -1
         self._feedback_reg    = 0
         self.spike_count[:]   = 0
+        self.eligibility_history.clear()
