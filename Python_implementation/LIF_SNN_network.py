@@ -146,7 +146,7 @@ class SNNLayer:
         feedback: If True, adds one extra input driven by NOR of previous outputs
     """
 
-    def __init__(self, n_inputs, n_outputs, neuron_params=None, synapse_params=None, feedback=False):
+    def __init__(self, n_inputs, n_outputs, neuron_params=None, synapse_params=None, feedback=False, track_eligibility=False):
         neuron_params  = neuron_params  or {}
         synapse_params = synapse_params or {}
 
@@ -180,13 +180,16 @@ class SNNLayer:
 
         w_init = synapse_params.get('w_init', None)
         if w_init is None:
-            self.weights = np.random.randint(77, 205, size=(n_outputs, self.n_inputs), dtype=np.int32)
+            self.weights = np.random.randint(64, 192, size=(n_outputs, self.n_inputs), dtype=np.int32)
         else:
             self.weights = np.full((n_outputs, self.n_inputs), w_init, dtype=np.int32)
 
         self.eligibility = np.zeros((n_outputs, self.n_inputs), dtype=np.int32)
         self.pre_timer   = np.full((n_outputs, self.n_inputs), -1, dtype=np.int32)
         self.post_timer  = np.full((n_outputs, self.n_inputs), -1, dtype=np.int32)
+
+        self.track_eligibility   = track_eligibility
+        self.eligibility_history = []  # list of (n_outputs, n_inputs) snapshots
 
     def forward(self, input_spikes):
         """
@@ -211,7 +214,7 @@ class SNNLayer:
         self.spike_count += output_arr
 
         if self.mode == 'stdp':
-            winner = self._winner_from_arr(output_arr)
+            winner = self.winner_takes_all(output_arr)
             # Lateral inhibition: suppress all non-winner membranes
             self.mem[np.arange(self.n_outputs) != winner] = self.reset_val
 
@@ -264,20 +267,20 @@ class SNNLayer:
         self.eligibility -= self.eligibility >> self.tau_e_shift
         np.clip(self.eligibility, -256, 256, out=self.eligibility)
 
+        if self.track_eligibility:
+            self.eligibility_history.append(self.eligibility.copy())
+
     def winner_takes_all(self, output_spikes):
         """
         Returns index of winning neuron.
         Spiking neurons beat non-spiking ones; pre-reset membrane breaks ties.
         """
-        return self._winner_from_arr(np.asarray(output_spikes, dtype=np.int32))
-
-    def _winner_from_arr(self, output_arr):
-        spiking = np.where(output_arr == 1)[0]
-        if len(spiking) == 1:
-            return int(spiking[0])
-        if len(spiking) > 1:
-            return int(spiking[np.argmax(self.pre_reset_mem[spiking])])
-        return int(np.argmax(self.pre_reset_mem))
+        spikes = np.asarray(output_spikes, dtype=np.int32)
+        spiking = np.where(spikes == 1)[0]
+        # If any neurons spiked, compete among them; otherwise all compete
+        pool = spiking if len(spiking) > 0 else np.arange(len(spikes))
+        # Highest pre-reset membrane potential wins (deterministic, no index bias)
+        return int(pool[np.argmax(self.pre_reset_mem[pool])])
 
     def apply_reward(self, dopamine, winner_idx):
         """
@@ -306,6 +309,15 @@ class SNNLayer:
             hex_values = [int(line.strip(), 16) for line in f]
         self.weights[:] = np.array(hex_values, dtype=np.int32).reshape(self.n_outputs, self.n_inputs)
 
+    def get_eligibility_history(self):
+        """
+        Return eligibility trace history as a numpy array of shape
+        (timesteps, n_outputs, n_inputs). Requires track_eligibility=True.
+        """
+        if not self.eligibility_history:
+            return np.empty((0, self.n_outputs, self.n_inputs), dtype=np.int32)
+        return np.stack(self.eligibility_history)
+
     def reset_state(self):
         """Reset all neuron and synapse trace state."""
         self.mem[:]           = 0
@@ -316,3 +328,4 @@ class SNNLayer:
         self.post_timer[:]    = -1
         self._feedback_reg    = 0
         self.spike_count[:]   = 0
+        self.eligibility_history.clear()
