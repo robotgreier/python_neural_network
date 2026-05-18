@@ -11,28 +11,38 @@ class LIF:
         reset: Membrane reset value after spike
     """
 
-    def __init__(self, decay=256, threshold=1024, reset=0):
+    def __init__(self, decay=400, threshold=750, reset=100, refractory=0):
         self.decay = decay
         self.threshold = threshold
         self.reset = reset
+        self.refractory = refractory
         self.mem = 0            # uint16, never negative
         self.pre_reset_mem = 0  # Membrane potential before reset, used for WTA
         self.spk = 0
+        self.refractory_timer = 0
 
     def update(self, synaptic_input):
         """Membrane update. Returns spike (0 or 1)."""
         self.spk = 0
+
+        if self.refractory_timer > 0:
+            self.mem = self.reset
+            self.pre_reset_mem = self.mem
+            self.refractory_timer -= 1
+            return 0
+
         self.mem = max(0, self.mem - self.decay) + synaptic_input
         self.pre_reset_mem = self.mem
 
         if self.mem >= self.threshold:
             self.spk = 1
             self.mem = self.reset
+            self.refractory_timer = self.refractory
 
         return self.spk
 
 
-class RSTDPSynapse:
+class Synapse:
     """
     Reward-modulated STDP synapse with rectangular window.
 
@@ -53,10 +63,10 @@ class RSTDPSynapse:
 
     DISABLED = -1
 
-    def __init__(self, lr_shift=2, w_init=None,
-                 t_pre=2, t_post=2, tau_e_shift=2,
-                 dw_pos=16, dw_neg=64,
-                 w_min=8, w_max=255,
+    def __init__(self, lr_shift=5, w_init=None,
+                 t_pre=3, t_post=1, tau_e_shift=2,
+                 dw_pos=10, dw_neg=9,
+                 w_min=16, w_max=254,
                  mode='rstdp'):
 
         self.mode = mode
@@ -101,10 +111,16 @@ class RSTDPSynapse:
                 self.eligibility += self.dw_pos
             self.post_timer = 0
 
-        self.eligibility -= self.eligibility >> self.tau_e_shift
+        # Arithmetic right-shift floors toward -inf, so negatives always decay
+        # by >=1 toward 0. For positives in [1, 2^tau_e_shift-1] the shift gives 0,
+        # which would leave the trace stuck — force decay-by-1 in that range.
+        decay_amt = self.eligibility >> self.tau_e_shift
+        if self.eligibility > 0 and decay_amt == 0:
+            decay_amt = 1
+        self.eligibility -= decay_amt
         self.eligibility = max(-256, min(256, self.eligibility))
 
-        # In stdp mode, apply weight update immediately based on eligibility trace (dopamine=1 -> ×1 multiplier)
+        # In stdp mode, apply weight update immediately (dopamine=1 → ×1 multiplier)
         if self.mode == 'stdp':
             self.apply_reward(dopamine=1)
 
@@ -133,7 +149,7 @@ class RSTDPSynapse:
         self.weight = max(self.w_min, min(self.w_max, new_weight))
 
 
-class SNNLayer:
+class Layer:
     """
     Fully-connected SNN layer with vectorised NumPy state arrays.
 
@@ -141,12 +157,12 @@ class SNNLayer:
         n_inputs: Number of pre-synaptic input neurons
         n_outputs: Number of post-synaptic output neurons
         neuron_params: Dict passed to LIF constructor
-        synapse_params: Dict passed to RSTDPSynapse constructor;
+        synapse_params: Dict passed to Synapse constructor;
                         include 'mode': 'stdp' or 'rstdp' (default)
         feedback: If True, adds one extra input driven by NOR of previous outputs
     """
 
-    def __init__(self, n_inputs, n_outputs, neuron_params=None, synapse_params=None, feedback=False, track_eligibility=False):
+    def __init__(self, n_inputs, n_outputs, neuron_params=None, synapse_params=None, feedback=False):
         neuron_params  = neuron_params  or {}
         synapse_params = synapse_params or {}
 
@@ -159,37 +175,38 @@ class SNNLayer:
         self.n_inputs = n_inputs + 1 if feedback else n_inputs
 
         # Neuron state (n_outputs,)
-        self.decay     = neuron_params.get('decay',     192)
-        self.threshold = neuron_params.get('threshold', 1024)
-        self.reset_val = neuron_params.get('reset',     0)
+        self.decay     = neuron_params.get('decay',     400)
+        self.threshold = neuron_params.get('threshold', 750)
+        self.reset_val = neuron_params.get('reset',     100)
+        self.refractory = neuron_params.get('refractory', 0)
 
-        self.mem           = np.zeros(n_outputs, dtype=np.int32)
-        self.pre_reset_mem = np.zeros(n_outputs, dtype=np.int32)
-        self.spk           = np.zeros(n_outputs, dtype=np.int32)
-        self.spike_count   = np.zeros(n_outputs, dtype=np.int32)
+        self.mem              = np.zeros(n_outputs, dtype=np.int32)
+        self.pre_reset_mem    = np.zeros(n_outputs, dtype=np.int32)
+        self.spk              = np.zeros(n_outputs, dtype=np.int32)
+        self.spike_count      = np.zeros(n_outputs, dtype=np.int32)
+        self.refractory_timer = np.zeros(n_outputs, dtype=np.int32)
 
         # Synapse state (n_outputs, n_inputs)
-        self.lr_shift    = synapse_params.get('lr_shift',    3)
-        self.t_pre       = synapse_params.get('t_pre',       2)
-        self.t_post      = synapse_params.get('t_post',      3)
-        self.tau_e_shift = synapse_params.get('tau_e_shift', 4)
-        self.dw_pos      = synapse_params.get('dw_pos',      64)
-        self.dw_neg      = synapse_params.get('dw_neg',      8)
-        self.w_min       = synapse_params.get('w_min',       8)
-        self.w_max       = synapse_params.get('w_max',       255)
+        self.lr_shift    = synapse_params.get('lr_shift',    5)
+        self.t_pre       = synapse_params.get('t_pre',       3)
+        self.t_post      = synapse_params.get('t_post',      1)
+        self.tau_e_shift = synapse_params.get('tau_e_shift', 2)
+        self.dw_pos      = synapse_params.get('dw_pos',      10)
+        self.dw_neg      = synapse_params.get('dw_neg',      9)
+        self.w_min       = synapse_params.get('w_min',       16)
+        self.w_max       = synapse_params.get('w_max',       254)
 
-        w_init = synapse_params.get('w_init', None)
-        if w_init is None:
+        w_init = synapse_params.get('w_init', "None")
+        if w_init == -1:
             self.weights = np.random.randint(64, 192, size=(n_outputs, self.n_inputs), dtype=np.int32)
         else:
             self.weights = np.full((n_outputs, self.n_inputs), w_init, dtype=np.int32)
 
-        self.eligibility = np.zeros((n_outputs, self.n_inputs), dtype=np.int32)
+        self.eligibility          = np.zeros((n_outputs, self.n_inputs), dtype=np.int32)
+        self.eligibility_snapshot = np.zeros((n_outputs, self.n_inputs), dtype=np.int32)
         self.pre_timer   = np.full((n_outputs, self.n_inputs), -1, dtype=np.int32)
         self.post_timer  = np.full((n_outputs, self.n_inputs), -1, dtype=np.int32)
-
-        self.track_eligibility   = track_eligibility
-        self.eligibility_history = []  # list of (n_outputs, n_inputs) snapshots
+        self.last_delta_w = np.zeros((n_outputs, self.n_inputs), dtype=np.int32)
 
     def forward(self, input_spikes):
         """
@@ -201,37 +218,51 @@ class SNNLayer:
         Returns:
             List of output spikes (length n_outputs)
         """
+        self.last_delta_w[:] = 0
+
         input_arr = np.asarray(input_spikes, dtype=np.int32)
         if self.feedback:
             input_arr = np.append(input_arr, self._feedback_reg)
 
-        # LIF membrane update
+        # LIF membrane update (refractory neurons are held at reset and cannot spike)
         synaptic_inputs = self.weights @ input_arr
-        self.mem = np.maximum(0, self.mem - self.decay) + synaptic_inputs
+        in_refractory = self.refractory_timer > 0
+        integrated = np.maximum(0, self.mem - self.decay) + synaptic_inputs
+        self.mem = np.where(in_refractory, self.reset_val, integrated)
         self.pre_reset_mem = self.mem.copy()
-        output_arr = (self.mem >= self.threshold).astype(np.int32)
+        output_arr = ((self.mem >= self.threshold) & ~in_refractory).astype(np.int32)
         self.mem = np.where(output_arr, self.reset_val, self.mem)
+        self.refractory_timer = np.where(
+            output_arr, self.refractory, np.maximum(0, self.refractory_timer - 1)
+        )
         self.spike_count += output_arr
 
         if self.mode == 'stdp':
-            winner = self.winner_takes_all(output_arr)
-            # Lateral inhibition: suppress all non-winner membranes
-            self.mem[np.arange(self.n_outputs) != winner] = self.reset_val
-
-            # Only winner's synapses see real spikes; losers decay only
+            # SV behaviour: WTA and lateral inhibition only fire on an actual spike.
+            # On silent timesteps every neuron keeps integrating its sub-threshold input.
             pre_mat  = np.zeros((self.n_outputs, self.n_inputs), dtype=np.int32)
             post_mat = np.zeros((self.n_outputs, self.n_inputs), dtype=np.int32)
-            pre_mat[winner]  = input_arr
-            post_mat[winner] = output_arr[winner]
+
+            if output_arr.any():
+                winner = self.winner_takes_all(output_arr)
+                self.mem[np.arange(self.n_outputs) != winner] = self.reset_val
+                pre_mat[winner]  = input_arr
+                post_mat[winner] = output_arr[winner]
+            else:
+                # No post spike: pre activity still advances timers on all rows
+                pre_mat[:] = input_arr
+
             self._update_eligibility(pre_mat, post_mat)
 
-            # Immediate weight update for all synapses (dopamine=1 -> signed multiply ×1)
+            # Immediate weight update for all synapses (dopamine=1 → signed multiply ×1)
             delta_w = self.eligibility >> self.lr_shift
+            self.last_delta_w[:] = delta_w
             self.weights = np.clip(self.weights + delta_w, self.w_min, self.w_max)
         else:
             pre_mat  = np.broadcast_to(input_arr[np.newaxis, :],  (self.n_outputs, self.n_inputs))
             post_mat = np.broadcast_to(output_arr[:, np.newaxis], (self.n_outputs, self.n_inputs))
             self._update_eligibility(pre_mat, post_mat)
+            self.eligibility_snapshot = self.eligibility.copy()
 
         if self.feedback:
             self._feedback_reg = int(not np.any(output_arr))
@@ -263,24 +294,24 @@ class SNNLayer:
                where=post_fired & (self.pre_timer >= 0))
         self.post_timer[post_fired] = 0
 
-        # Decay and clamp
-        self.eligibility -= self.eligibility >> self.tau_e_shift
+        # Decay and clamp. Arithmetic right-shift floors toward -inf, so negatives
+        # converge to 0; positives in [1, 2^tau_e_shift-1] would shift to 0 and get
+        # stuck — force decay-by-1 in that dead-zone.
+        decay_amt = self.eligibility >> self.tau_e_shift
+        decay_amt[(self.eligibility > 0) & (decay_amt == 0)] = 1
+        self.eligibility -= decay_amt
         np.clip(self.eligibility, -256, 256, out=self.eligibility)
-
-        if self.track_eligibility:
-            self.eligibility_history.append(self.eligibility.copy())
 
     def winner_takes_all(self, output_spikes):
         """
-        Returns index of winning neuron.
-        Spiking neurons beat non-spiking ones; pre-reset membrane breaks ties.
+        Returns index of winning neuron, or -1 if no neuron spiked.
+        Pre-reset membrane breaks ties among spiking neurons.
         """
         spikes = np.asarray(output_spikes, dtype=np.int32)
         spiking = np.where(spikes == 1)[0]
-        # If any neurons spiked, compete among them; otherwise all compete
-        pool = spiking if len(spiking) > 0 else np.arange(len(spikes))
-        # Highest pre-reset membrane potential wins (deterministic, no index bias)
-        return int(pool[np.argmax(self.pre_reset_mem[pool])])
+        if len(spiking) == 0:
+            return -1
+        return int(spiking[np.argmax(self.pre_reset_mem[spiking])])
 
     def apply_reward(self, dopamine, winner_idx):
         """
@@ -295,7 +326,9 @@ class SNNLayer:
         if self.mode == 'stdp':
             return
 
-        delta_w = (self.eligibility[winner_idx] * dopamine) >> self.lr_shift
+        lr = 1 << self.lr_shift
+        delta_w = np.round(self.eligibility_snapshot[winner_idx] * dopamine / lr).astype(np.int32)
+        self.last_delta_w[winner_idx] = delta_w
         new_row = self.weights[winner_idx] + delta_w
         np.clip(new_row, self.w_min, self.w_max, out=self.weights[winner_idx])
 
@@ -304,28 +337,37 @@ class SNNLayer:
         return self.weights.copy()
 
     def load_weights(self, weight_file="weights.mem"):
-        """Load weights from a hex file (one value per line)."""
-        with open(weight_file) as f:
-            hex_values = [int(line.strip(), 16) for line in f]
-        self.weights[:] = np.array(hex_values, dtype=np.int32).reshape(self.n_outputs, self.n_inputs)
+        """Load weights from a hex .mem file, one value per line."""
+        with open(weight_file, "r") as f:
+            hex_values = [
+                int(line.strip(), 16)
+                for line in f
+                if line.strip()
+            ]
 
-    def get_eligibility_history(self):
-        """
-        Return eligibility trace history as a numpy array of shape
-        (timesteps, n_outputs, n_inputs). Requires track_eligibility=True.
-        """
-        if not self.eligibility_history:
-            return np.empty((0, self.n_outputs, self.n_inputs), dtype=np.int32)
-        return np.stack(self.eligibility_history)
+        expected = self.n_outputs * self.n_inputs
+
+        if len(hex_values) != expected:
+            raise ValueError(
+                f"Weight file has {len(hex_values)} values, expected {expected} "
+                f"for shape ({self.n_outputs}, {self.n_inputs})"
+            )
+
+        self.weights[:] = np.array(hex_values, dtype=np.int32).reshape(
+            self.n_outputs,
+            self.n_inputs
+        )
 
     def reset_state(self):
         """Reset all neuron and synapse trace state."""
         self.mem[:]           = 0
         self.spk[:]           = 0
         self.pre_reset_mem[:] = 0
-        self.eligibility[:]   = 0
+        self.eligibility[:]          = 0
+        self.eligibility_snapshot[:] = 0
         self.pre_timer[:]     = -1
         self.post_timer[:]    = -1
         self._feedback_reg    = 0
         self.spike_count[:]   = 0
-        self.eligibility_history.clear()
+        self.last_delta_w[:]  = 0
+        self.refractory_timer[:] = 0
